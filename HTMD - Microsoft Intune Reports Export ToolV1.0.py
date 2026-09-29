@@ -984,47 +984,44 @@ class ParameterDialog:
                 '$top': 1000  # Increased limit
             }
             
-            response = self.parent.make_authenticated_request('GET', url, params=params)
+            devices = self.parent.fetch_all_graph_pages(
+                url,
+                params=params,
+                operation_type='api_call'
+            )
+                
+            # Store raw device data for search
+            self.device_search_data = devices
             
-            if response and response.status_code == 200:
-                data = response.json()
-                devices = data.get('value', [])
+            # Clear previous mappings
+            self.device_id_mapping = {}
+            
+            device_display_list = []
+            for device in devices:
+                device_name = device.get('deviceName', 'Unknown')
+                user_name = device.get('userPrincipalName', 'No User')
+                device_id = device.get('id', '')
                 
-                # Store raw device data for search
-                self.device_search_data = devices
+                # Create user-friendly display name (just device and user)
+                display_name = f"{device_name} ({user_name})"
                 
-                # Clear previous mappings
-                self.device_id_mapping = {}
+                # Map display name to device ID
+                self.device_id_mapping[display_name] = device_id
+                device_display_list.append(display_name)
+            
+            if device_display_list:
+                # Sort alphabetically
+                device_display_list.sort()
+                combo_widget['values'] = device_display_list
+                var_widget.set('')  # Clear loading text
                 
-                device_display_list = []
-                for device in devices:
-                    device_name = device.get('deviceName', 'Unknown')
-                    user_name = device.get('userPrincipalName', 'No User')
-                    device_id = device.get('id', '')
-                    
-                    # Create user-friendly display name (just device and user)
-                    display_name = f"{device_name} ({user_name})"
-                    
-                    # Map display name to device ID
-                    self.device_id_mapping[display_name] = device_id
-                    device_display_list.append(display_name)
-                
-                if device_display_list:
-                    # Sort alphabetically
-                    device_display_list.sort()
-                    combo_widget['values'] = device_display_list
-                    var_widget.set('')  # Clear loading text
-                    
-                    # Update placeholder
-                    if hasattr(combo_widget, 'set'):
-                        placeholder = f"Search {len(device_display_list)} devices or paste device name..."
-                        combo_widget.delete(0, 'end')
-                        combo_widget.insert(0, placeholder)
-                else:
-                    combo_widget['values'] = ['No devices found in tenant']
-                    var_widget.set('')
+                # Update placeholder
+                if hasattr(combo_widget, 'set'):
+                    placeholder = f"Search {len(device_display_list)} devices or paste device name..."
+                    combo_widget.delete(0, 'end')
+                    combo_widget.insert(0, placeholder)
             else:
-                combo_widget['values'] = ['Failed to load devices - check permissions']
+                combo_widget['values'] = ['No devices found in tenant']
                 var_widget.set('')
                 
         except Exception as e:
@@ -1152,38 +1149,36 @@ class ParameterDialog:
             url = f"{self.parent.graph_base_url}{policy_endpoint}"
             params = {'$select': 'id,displayName', '$top': 100}
             
-            response = self.parent.make_authenticated_request('GET', url, params=params)
+            policies = self.parent.fetch_all_graph_pages(
+                url,
+                params=params,
+                operation_type='api_call'
+            )
+                
+            policy_list = []
+            policy_mapping = {}  # Map policy names to IDs
+            policy_type = self.get_policy_type_name()
             
-            if response and response.status_code == 200:
-                data = response.json()
-                policies = data.get('value', [])
-                
-                policy_list = []
-                policy_mapping = {}  # Map policy names to IDs
-                policy_type = self.get_policy_type_name()
-                
-                for policy in policies:
-                    display_name = policy.get('displayName', 'Unnamed Policy')
-                    policy_id = policy.get('id')
-                    policy_list.append(display_name)
-                    policy_mapping[display_name] = policy_id
-                
-                if policy_list:
-                    combo_widget.all_policies = policy_list
-                    combo_widget.policy_mapping = policy_mapping  # Store name-to-ID mapping
-                    combo_widget['values'] = policy_list
-                    # Store mapping at dialog level for easy access during parameter collection
-                    if not hasattr(self, 'policy_name_to_id_mapping'):
-                        self.policy_name_to_id_mapping = {}
-                    self.policy_name_to_id_mapping.update(policy_mapping)
-                    var_widget.set('')
-                    self.log_policy_load_success(policy_type, len(policy_list))
-                else:
-                    combo_widget.all_policies = []
-                    combo_widget.policy_mapping = {}
-                    combo_widget['values'] = [f'No {policy_type.lower()} found']
+            for policy in policies:
+                display_name = policy.get('displayName', 'Unnamed Policy')
+                policy_id = policy.get('id')
+                policy_list.append(display_name)
+                policy_mapping[display_name] = policy_id
+            
+            if policy_list:
+                combo_widget.all_policies = policy_list
+                combo_widget.policy_mapping = policy_mapping  # Store name-to-ID mapping
+                combo_widget['values'] = policy_list
+                # Store mapping at dialog level for easy access during parameter collection
+                if not hasattr(self, 'policy_name_to_id_mapping'):
+                    self.policy_name_to_id_mapping = {}
+                self.policy_name_to_id_mapping.update(policy_mapping)
+                var_widget.set('')
+                self.log_policy_load_success(policy_type, len(policy_list))
             else:
-                combo_widget['values'] = [f'Failed to load {policy_type.lower()}']
+                combo_widget.all_policies = []
+                combo_widget.policy_mapping = {}
+                combo_widget['values'] = [f'No {policy_type.lower()} found']
                 
         except Exception as e:
             combo_widget['values'] = [f'Error loading policies: {str(e)}']
@@ -3495,6 +3490,52 @@ Export first, choose columns later!"""
         # If we get here, all retries failed
         return last_response
 
+    def fetch_all_graph_pages(self, url, params=None, operation_type='api_call', max_pages=2000, progress_callback=None):
+        """Fetch all paged Microsoft Graph results using @odata.nextLink."""
+        all_items = []
+        current_url = url
+        current_params = dict(params) if params else {}
+        page_number = 0
+
+        while current_url:
+            page_number += 1
+            if page_number > max_pages:
+                raise Exception(f"Paging limit reached ({max_pages} pages). Aborting to prevent infinite loop.")
+
+            response = self.make_authenticated_request(
+                'GET',
+                current_url,
+                operation_type=operation_type,
+                params=current_params
+            )
+
+            if not response:
+                raise Exception("No response received from Microsoft Graph.")
+
+            if response.status_code != 200:
+                error_detail = self.parse_error_response(response)
+                raise Exception(f"Graph paging request failed (HTTP {response.status_code}): {error_detail}")
+
+            try:
+                data = response.json()
+            except json.JSONDecodeError:
+                raise Exception("Invalid JSON response returned by Microsoft Graph.")
+
+            page_items = data.get('value', [])
+            if not isinstance(page_items, list):
+                raise Exception("Unexpected Microsoft Graph response format: 'value' is not a list.")
+
+            all_items.extend(page_items)
+
+            if progress_callback:
+                progress_callback(page_number, len(page_items), len(all_items))
+
+            current_url = data.get('@odata.nextLink')
+            # nextLink already includes query string parameters.
+            current_params = None
+
+        return all_items
+
     def manual_token_refresh(self):
         """Manually refresh the token when user clicks the button"""
         try:
@@ -3995,70 +4036,49 @@ Export first, choose columns later!"""
             # Debug: Check token permissions
             self.debug_token_permissions()
             
-            headers = {
-                'Authorization': f'Bearer {self.access_token}',
-                'Content-Type': 'application/json'
-            }
-            
             self.root.after(0, lambda: self.progress_label.config(text="Making API call..."))
             
             try:
-                # Make GET request with parameters using enhanced method
-                response = self.make_authenticated_request('GET', url, 
-                                                           operation_type='api_call',
-                                                           params=final_parameters)
-                
-                self.log_message(f"API Response Status: {response.status_code}", 'api')
-                self.log_message(f"Response Headers: {dict(response.headers)}", 'debug')
-                
+                def on_page_fetched(page_number, page_count, total_count):
+                    self.log_message(
+                        f"Fetched page {page_number}: {page_count} items (total: {total_count})",
+                        'debug'
+                    )
+                    self.root.after(0, lambda: self.progress_label.config(
+                        text=f"Fetching page {page_number}... Total records: {total_count:,}"
+                    ))
+
+                items = self.fetch_all_graph_pages(
+                    url,
+                    params=final_parameters,
+                    operation_type='api_call',
+                    progress_callback=on_page_fetched
+                )
+
             except requests.exceptions.Timeout:
                 raise Exception("Request timeout - API took too long to respond")
             except requests.exceptions.ConnectionError as e:
                 raise Exception(f"Connection error - Unable to reach Microsoft Graph API: {str(e)}")
             except requests.exceptions.RequestException as e:
                 raise Exception(f"Request failed: {str(e)}")
-            
-            if response.status_code == 200:
-                try:
-                    data = response.json()
-                    self.log_message(f"Raw API response keys: {list(data.keys())}", 'debug')
-                    
-                    # Extract the value array (Graph API returns data in 'value' field)
-                    if 'value' in data:
-                        items = data['value']
-                        self.log_message(f"API returned {len(items)} items", 'success')
-                        
-                        if items:
-                            # Log first item structure for debugging
-                            if len(items) > 0:
-                                self.log_message(f"First item keys: {list(items[0].keys()) if items[0] else 'No keys'}", 'debug')
-                            
-                            # Convert to DataFrame
-                            import pandas as pd
-                            df = pd.DataFrame(items)
-                            self.log_message(f"Created DataFrame with shape: {df.shape}", 'debug')
-                            
-                            # Show the data
-                            self.root.after(0, lambda: self.progress_label.config(text="Processing data..."))
-                            self.process_direct_api_data(df, report_name)
-                        else:
-                            self.log_message("No data returned from API", 'warning')
-                            raise Exception("No data available for this report")
-                    else:
-                        raise Exception("Unexpected API response format - missing 'value' field")
-                        
-                except json.JSONDecodeError:
-                    raise Exception(f"Invalid JSON response from API: {response.text}")
-                    
-            elif response.status_code == 403:
-                error_detail = self.parse_error_response(response)
-                permission_error = f"Insufficient permissions to access {report_name}.\n\nRequired permission: {required_permission}\n\nPlease contact your administrator to grant this permission."
-                raise Exception(permission_error)
-            elif response.status_code == 401:
-                raise Exception("Authentication failed - Token may be expired. Please logout and login again.")
+
+            self.log_message(f"API returned {len(items)} total items", 'success')
+
+            if items:
+                # Log first item structure for debugging
+                self.log_message(f"First item keys: {list(items[0].keys()) if items[0] else 'No keys'}", 'debug')
+
+                # Convert to DataFrame
+                import pandas as pd
+                df = pd.DataFrame(items)
+                self.log_message(f"Created DataFrame with shape: {df.shape}", 'debug')
+
+                # Show the data
+                self.root.after(0, lambda: self.progress_label.config(text="Processing data..."))
+                self.process_direct_api_data(df, report_name)
             else:
-                error_detail = self.parse_error_response(response)
-                raise Exception(f"API Error (HTTP {response.status_code}): {error_detail}")
+                self.log_message("No data returned from API", 'warning')
+                raise Exception("No data available for this report")
                 
         except Exception as e:
             self.log_message(f"Direct API thread failed: {str(e)}", 'error')
